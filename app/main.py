@@ -25,7 +25,7 @@ if not os.path.exists(model_path):
 # Cache model in memory to prevent reloading per interaction
 @st.cache_resource
 def load_trained_model(path):
-    return tf.keras.models.load_model(path)
+    return tf.keras.models.load_model(path, compile=False)
 
 
 model = load_trained_model(model_path)
