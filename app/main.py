@@ -17,12 +17,9 @@ model_path = os.path.join(model_dir, "plant_disease_prediction_model.keras")
 
 # Auto-download model weights from Google Drive if not found locally
 if not os.path.exists(model_path):
-    # Extracted from your Google Drive link
     file_id = "1rKh-IElSdHTqax7XdfSdZTn-r8T_qWPf"
-    drive_url = f"https://drive.google.com/uc?id={file_id}"
     with st.spinner("Downloading model weights... This may take a minute on initial setup."):
-        gdown.download(drive_url, model_path, quiet=False)
-
+        gdown.download(id=file_id, output=model_path, quiet=False, fuzzy=True)
 
 # Cache model in memory to prevent reloading per interaction
 @st.cache_resource
