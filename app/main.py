@@ -1,60 +1,98 @@
 import os
 import json
 from PIL import Image
-
 import numpy as np
 import tensorflow as tf
 import streamlit as st
+import gdown
 
+# Configure page
+st.set_page_config(page_title="Plant Disease Classifier", page_icon="🌿", layout="centered")
 
 working_dir = os.path.dirname(os.path.abspath(__file__))
-model_path = f"{working_dir}/trained_model/plant_disease_prediction_model.h5"
-# Load the pre-trained model
-model = tf.keras.models.load_model(model_path)
+model_dir = os.path.join(working_dir, "trained_model")
+os.makedirs(model_dir, exist_ok=True)
 
-# loading the class names
-class_indices = json.load(open(f"{working_dir}/class_indices.json"))
+model_path = os.path.join(model_dir, "plant_disease_prediction_model.keras")
+
+# Auto-download model weights from Google Drive if not found locally
+if not os.path.exists(model_path):
+    # Extracted from your Google Drive link
+    file_id = "1rKh-IElSdHTqax7XdfSdZTn-r8T_qWPf"
+    drive_url = f"https://drive.google.com/uc?id={file_id}"
+    with st.spinner("Downloading model weights... This may take a minute on initial setup."):
+        gdown.download(drive_url, model_path, quiet=False)
 
 
-# Function to Load and Preprocess the Image using Pillow
-def load_and_preprocess_image(image_path, target_size=(224, 224)):
-    # Load the image
-    img = Image.open(image_path)
-    # Resize the image
+# Cache model in memory to prevent reloading per interaction
+@st.cache_resource
+def load_trained_model(path):
+    return tf.keras.models.load_model(path)
+
+
+model = load_trained_model(model_path)
+
+# Load class label indices
+labels_path = os.path.join(working_dir, "class_indices.json")
+with open(labels_path, "r") as f:
+    raw_indices = json.load(f)
+
+# Handle both key-value configurations: {"0": "Class_Name"} or {"Class_Name": 0}
+sample_val = next(iter(raw_indices.values()))
+if isinstance(sample_val, int):
+    class_indices = {str(v): k for k, v in raw_indices.items()}
+else:
+    class_indices = {str(k): v for k, v in raw_indices.items()}
+
+
+def load_and_preprocess_image(image_file, target_size=(224, 224)):
+    # Convert image strictly to 3-channel RGB (handles RGBA or Grayscale)
+    img = Image.open(image_file).convert("RGB")
     img = img.resize(target_size)
-    # Convert the image to a numpy array
-    img_array = np.array(img)
-    # Add batch dimension
+    
+    # Scale to [0, 1] matching model training normalization
+    img_array = np.array(img, dtype=np.float32) / 255.0
+    
+    # Add batch dimension: shape (1, 224, 224, 3)
     img_array = np.expand_dims(img_array, axis=0)
-    # Scale the image values to [0, 1]
-    img_array = img_array.astype('float32') / 255.
     return img_array
 
 
-# Function to Predict the Class of an Image
-def predict_image_class(model, image_path, class_indices):
-    preprocessed_img = load_and_preprocess_image(image_path)
-    predictions = model.predict(preprocessed_img)
-    predicted_class_index = np.argmax(predictions, axis=1)[0]
-    predicted_class_name = class_indices[str(predicted_class_index)]
-    return predicted_class_name
+def predict_image_class(model, image_file, class_indices):
+    preprocessed_img = load_and_preprocess_image(image_file)
+    predictions = model.predict(preprocessed_img)[0]
+    
+    # Extract top 3 prediction candidates
+    top_3_indices = np.argsort(predictions)[-3:][::-1]
+    results = []
+    for idx in top_3_indices:
+        label = class_indices.get(str(idx), "Unknown Class")
+        confidence = float(predictions[idx] * 100)
+        results.append((label, confidence))
+    return results
 
 
-# Streamlit App
-st.title('Plant Disease Classifier')
+# Application UI
+st.title("🌿 Plant Disease Classifier")
+st.write("Upload an image of a plant leaf to identify its health status and detect diseases.")
 
-uploaded_image = st.file_uploader("Upload an image...", type=["jpg", "jpeg", "png"])
+uploaded_image = st.file_uploader("Choose a leaf image...", type=["jpg", "jpeg", "png"])
 
 if uploaded_image is not None:
-    image = Image.open(uploaded_image)
     col1, col2 = st.columns(2)
-
+    
     with col1:
-        resized_img = image.resize((150, 150))
-        st.image(resized_img)
-
+        st.image(uploaded_image, caption="Uploaded Leaf", use_container_width=True)
+    
     with col2:
-        if st.button('Classify'):
-            # Preprocess the uploaded image and predict the class
-            prediction = predict_image_class(model, uploaded_image, class_indices)
-            st.success(f'Prediction: {str(prediction)}')
+        if st.button("Classify Leaf"):
+            with st.spinner("Analyzing image..."):
+                predictions = predict_image_class(model, uploaded_image, class_indices)
+                top_class, top_conf = predictions[0]
+
+                st.success(f"**Top Prediction:** {top_class}")
+                st.info(f"**Confidence:** {top_conf:.2f}%")
+
+                with st.expander("View Top Alternative Predictions"):
+                    for label, conf in predictions[1:]:
+                        st.write(f"- **{label}**: {conf:.2f}%")
