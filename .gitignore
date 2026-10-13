@@ -1,0 +1,13 @@
+﻿# Virtual environments
+venv/
+**/venv/
+.venv/
+**/site-packages/
+
+# Model files (too large for GitHub)
+app/trained_model/*.keras
+app/trained_model/*.h5
+
+# Cache
+__pycache__/
+*.pyc
