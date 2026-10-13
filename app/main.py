@@ -85,7 +85,8 @@ model_path = os.path.join(model_dir, "plant_disease_prediction_model.keras")
 labels_path = os.path.join(working_dir, "class_indices.json")
 disease_info_path = os.path.join(working_dir, "disease_info.json")
 
-MODEL_RELEASE_URL = "https://github.com/Kunal9122/plant-disease-prediction/releases/download/v1.0/plant_disease_prediction_model.keras"
+# Fixed tag: changed from v1.0 to v1.0.0
+MODEL_RELEASE_URL = "https://github.com/Kunal9122/plant-disease-prediction/releases/download/v1.0.0/plant_disease_prediction_model.keras"
 SEVERITY_ICON = {"high": "🔴", "moderate": "🟠", "none": "🟢", "unknown": "⚪"}
 
 
@@ -145,10 +146,11 @@ disease_info_db = load_disease_info(disease_info_path)
 
 
 def get_treatment(predicted_class):
+    clean_name = predicted_class.replace("___", " - ").replace("_", " ")
     return disease_info_db.get(
         predicted_class,
         {
-            "disease_name": predicted_class.replace("___", " - ").replace("_", " "),
+            "disease_name": clean_name,
             "severity": "unknown",
             "pesticide": "No specific record found. Consult an agricultural extension specialist.",
             "organic_alternative": "Ensure optimal aeration, avoid overhead irrigation, and prune affected leaves.",
