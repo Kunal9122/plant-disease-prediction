@@ -86,10 +86,8 @@ model_path = os.path.join(model_dir, "plant_disease_prediction_model.keras")
 labels_path = os.path.join(working_dir, "class_indices.json")
 disease_info_path = os.path.join(working_dir, "disease_info.json")
 
-# If trained_model/plant_disease_prediction_model.keras already exists, it is
-# used as-is and nothing is downloaded. After retraining, upload the NEW model
-# to a GitHub release and put its URL here (the old v1.0 link gives a 404).
-MODEL_RELEASE_URL = "https://github.com/Kunal9122/plant-disease-prediction/releases/download/v2.0/plant_disease_prediction_model.keras"
+# Fixed tag: changed v2.0 -> v2.0.0
+MODEL_RELEASE_URL = "https://github.com/Kunal9122/plant-disease-prediction/releases/download/v2.0.0/plant_disease_prediction_model.keras"
 SEVERITY_ICON = {"high": "🔴", "moderate": "🟠", "none": "🟢", "unknown": "⚪"}
 
 # Below this confidence (%) the app warns that the result is unreliable.
@@ -101,7 +99,7 @@ LOW_CONFIDENCE_THRESHOLD = 60.0
 # ----------------------------------------------------------------------------
 @st.cache_resource(show_spinner=False)
 def get_model(path, url):
-    if not os.path.exists(path):
+    if not os.path.exists(path) or os.path.getsize(path) < 1000000:
         progress_text = st.empty()
         download_bar = st.progress(0)
         progress_text.info("📥 Downloading model weights from GitHub Release. Please wait...")
@@ -112,12 +110,16 @@ def get_model(path, url):
                 download_bar.progress(percent)
 
         try:
+            # Custom User-Agent prevents GitHub raw bot blocking
+            opener = urllib.request.build_opener()
+            opener.addheaders = [("User-Agent", "Mozilla/5.0")]
+            urllib.request.install_opener(opener)
             urllib.request.urlretrieve(url, path, reporthook=update_progress)
             progress_text.empty()
             download_bar.empty()
         except Exception as e:
             if os.path.exists(path):
-                os.remove(path)  # don't keep a broken partial file
+                os.remove(path)
             progress_text.error(f"Failed to download model weights: {e}")
             raise e
 
@@ -126,11 +128,6 @@ def get_model(path, url):
 
 model = get_model(model_path, MODEL_RELEASE_URL)
 
-# The retrained model is meant to receive RAW pixels (0-255) because it scales
-# them itself. The old CNN needs pixels divided by 255. We try to detect this
-# automatically, but you can force it with PIXEL_DIVISOR_OVERRIDE:
-#   1.0   -> send raw 0-255 pixels
-#   255.0 -> send pixels scaled to 0-1
 PIXEL_DIVISOR_OVERRIDE = None
 
 
@@ -142,7 +139,7 @@ def _has_rescaling(layer_or_model):
 
 
 MODEL_HAS_RESCALING = _has_rescaling(model)
-config_path = os.path.join(working_dir, "model_config.json")  # written by train_model.py
+config_path = os.path.join(working_dir, "model_config.json")
 if PIXEL_DIVISOR_OVERRIDE is not None:
     PIXEL_DIVISOR = float(PIXEL_DIVISOR_OVERRIDE)
 elif os.path.exists(config_path):
@@ -199,7 +196,7 @@ def load_and_preprocess_image(image_file, target_size=(224, 224)):
     if hasattr(image_file, "seek"):
         image_file.seek(0)
     img = Image.open(image_file)
-    img = ImageOps.exif_transpose(img)  # phone photos are often stored rotated
+    img = ImageOps.exif_transpose(img)
     img = img.convert("RGB")
     img = img.resize(target_size)
     img_array = np.array(img, dtype=np.float32) / PIXEL_DIVISOR
@@ -253,7 +250,7 @@ with st.sidebar:
     if st.session_state.history:
         for item in reversed(st.session_state.history[-5:]):
             st.caption(f"{item['time']} — {item['disease']} ({item['confidence']:.1f}%)")
-        if st.button("Clear history", width="stretch"):
+        if st.button("Clear history", use_container_width=True):
             st.session_state.history = []
             st.session_state.predictions_cache = {}
             st.rerun()
@@ -280,16 +277,14 @@ uploaded_images = st.file_uploader(
 
 if uploaded_images:
     for uploaded_image in uploaded_images:
-        # Unique key per file CONTENT, so two different files with the same
-        # name can never show each other's results.
         file_key = hashlib.md5(uploaded_image.getvalue()).hexdigest()[:12]
 
         st.markdown("---")
         col1, col2 = st.columns([1, 1.4])
 
         with col1:
-            st.image(uploaded_image, caption=uploaded_image.name, width="stretch")
-            if st.button(f"Classify: {uploaded_image.name}", key=f"btn_{file_key}", width="stretch"):
+            st.image(uploaded_image, caption=uploaded_image.name, use_container_width=True)
+            if st.button(f"Classify: {uploaded_image.name}", key=f"btn_{file_key}", use_container_width=True):
                 with st.spinner("Analyzing foliage patterns..."):
                     preds = predict_image_class(model, uploaded_image, class_indices)
                     top_cls, top_cnf = preds[0]
