@@ -1,9 +1,10 @@
 import os
 import json
+import hashlib
 import urllib.request
 from datetime import datetime
 
-from PIL import Image
+from PIL import Image, ImageOps
 import numpy as np
 import tensorflow as tf
 import streamlit as st
@@ -85,9 +86,14 @@ model_path = os.path.join(model_dir, "plant_disease_prediction_model.keras")
 labels_path = os.path.join(working_dir, "class_indices.json")
 disease_info_path = os.path.join(working_dir, "disease_info.json")
 
-# Fixed tag: changed from v1.0 to v1.0.0
-MODEL_RELEASE_URL = "https://github.com/Kunal9122/plant-disease-prediction/releases/download/v1.0.0/plant_disease_prediction_model.keras"
+# If trained_model/plant_disease_prediction_model.keras already exists, it is
+# used as-is and nothing is downloaded. After retraining, upload the NEW model
+# to a GitHub release and put its URL here (the old v1.0 link gives a 404).
+MODEL_RELEASE_URL = "https://github.com/Kunal9122/plant-disease-prediction/releases/download/v2.0/plant_disease_prediction_model.keras"
 SEVERITY_ICON = {"high": "🔴", "moderate": "🟠", "none": "🟢", "unknown": "⚪"}
+
+# Below this confidence (%) the app warns that the result is unreliable.
+LOW_CONFIDENCE_THRESHOLD = 60.0
 
 
 # ----------------------------------------------------------------------------
@@ -98,7 +104,7 @@ def get_model(path, url):
     if not os.path.exists(path):
         progress_text = st.empty()
         download_bar = st.progress(0)
-        progress_text.info("📥 Downloading model weights from GitHub Release (~547 MB). Please wait...")
+        progress_text.info("📥 Downloading model weights from GitHub Release. Please wait...")
 
         def update_progress(block_num, block_size, total_size):
             if total_size > 0:
@@ -110,6 +116,8 @@ def get_model(path, url):
             progress_text.empty()
             download_bar.empty()
         except Exception as e:
+            if os.path.exists(path):
+                os.remove(path)  # don't keep a broken partial file
             progress_text.error(f"Failed to download model weights: {e}")
             raise e
 
@@ -117,6 +125,31 @@ def get_model(path, url):
 
 
 model = get_model(model_path, MODEL_RELEASE_URL)
+
+# The retrained model is meant to receive RAW pixels (0-255) because it scales
+# them itself. The old CNN needs pixels divided by 255. We try to detect this
+# automatically, but you can force it with PIXEL_DIVISOR_OVERRIDE:
+#   1.0   -> send raw 0-255 pixels
+#   255.0 -> send pixels scaled to 0-1
+PIXEL_DIVISOR_OVERRIDE = None
+
+
+def _has_rescaling(layer_or_model):
+    for layer in getattr(layer_or_model, "layers", []):
+        if isinstance(layer, tf.keras.layers.Rescaling) or _has_rescaling(layer):
+            return True
+    return False
+
+
+MODEL_HAS_RESCALING = _has_rescaling(model)
+config_path = os.path.join(working_dir, "model_config.json")  # written by train_model.py
+if PIXEL_DIVISOR_OVERRIDE is not None:
+    PIXEL_DIVISOR = float(PIXEL_DIVISOR_OVERRIDE)
+elif os.path.exists(config_path):
+    with open(config_path, "r") as f:
+        PIXEL_DIVISOR = float(json.load(f).get("pixel_divisor", 255.0))
+else:
+    PIXEL_DIVISOR = 1.0 if MODEL_HAS_RESCALING else 255.0
 
 # ----------------------------------------------------------------------------
 # Load class indices
@@ -146,11 +179,10 @@ disease_info_db = load_disease_info(disease_info_path)
 
 
 def get_treatment(predicted_class):
-    clean_name = predicted_class.replace("___", " - ").replace("_", " ")
     return disease_info_db.get(
         predicted_class,
         {
-            "disease_name": clean_name,
+            "disease_name": predicted_class.replace("___", " - ").replace("_", " "),
             "severity": "unknown",
             "pesticide": "No specific record found. Consult an agricultural extension specialist.",
             "organic_alternative": "Ensure optimal aeration, avoid overhead irrigation, and prune affected leaves.",
@@ -164,15 +196,19 @@ def get_treatment(predicted_class):
 # Preprocessing and Prediction
 # ----------------------------------------------------------------------------
 def load_and_preprocess_image(image_file, target_size=(224, 224)):
-    img = Image.open(image_file).convert("RGB")
+    if hasattr(image_file, "seek"):
+        image_file.seek(0)
+    img = Image.open(image_file)
+    img = ImageOps.exif_transpose(img)  # phone photos are often stored rotated
+    img = img.convert("RGB")
     img = img.resize(target_size)
-    img_array = np.array(img, dtype=np.float32) / 255.0
+    img_array = np.array(img, dtype=np.float32) / PIXEL_DIVISOR
     return np.expand_dims(img_array, axis=0)
 
 
 def predict_image_class(trained_model, image_file, mapping):
     preprocessed_img = load_and_preprocess_image(image_file)
-    predictions = trained_model.predict(preprocessed_img)[0]
+    predictions = trained_model.predict(preprocessed_img, verbose=0)[0]
 
     top_3_indices = np.argsort(predictions)[-3:][::-1]
     return [(mapping.get(str(idx), "Unknown Class"), float(predictions[idx] * 100)) for idx in top_3_indices]
@@ -198,6 +234,15 @@ with st.sidebar:
     )
 
     st.markdown("---")
+    st.markdown("### 📸 Photo tips")
+    st.caption(
+        "One leaf, filling most of the frame, in good daylight, in focus. "
+        "Avoid busy backgrounds, shadows and blur."
+    )
+
+    st.caption(f"Model input scaling: pixels ÷ {PIXEL_DIVISOR:g}")
+
+    st.markdown("---")
     st.markdown("### 🎨 Severity Legend")
     st.markdown("🔴 High — critical damage risk")
     st.markdown("🟠 Moderate — treat promptly")
@@ -208,7 +253,7 @@ with st.sidebar:
     if st.session_state.history:
         for item in reversed(st.session_state.history[-5:]):
             st.caption(f"{item['time']} — {item['disease']} ({item['confidence']:.1f}%)")
-        if st.button("Clear history", use_container_width=True):
+        if st.button("Clear history", width="stretch"):
             st.session_state.history = []
             st.session_state.predictions_cache = {}
             st.rerun()
@@ -235,18 +280,22 @@ uploaded_images = st.file_uploader(
 
 if uploaded_images:
     for uploaded_image in uploaded_images:
+        # Unique key per file CONTENT, so two different files with the same
+        # name can never show each other's results.
+        file_key = hashlib.md5(uploaded_image.getvalue()).hexdigest()[:12]
+
         st.markdown("---")
         col1, col2 = st.columns([1, 1.4])
 
         with col1:
-            st.image(uploaded_image, caption=uploaded_image.name, use_container_width=True)
-            if st.button(f"Classify: {uploaded_image.name}", key=f"btn_{uploaded_image.name}", use_container_width=True):
+            st.image(uploaded_image, caption=uploaded_image.name, width="stretch")
+            if st.button(f"Classify: {uploaded_image.name}", key=f"btn_{file_key}", width="stretch"):
                 with st.spinner("Analyzing foliage patterns..."):
                     preds = predict_image_class(model, uploaded_image, class_indices)
                     top_cls, top_cnf = preds[0]
                     treat_info = get_treatment(top_cls)
 
-                    st.session_state.predictions_cache[uploaded_image.name] = {
+                    st.session_state.predictions_cache[file_key] = {
                         "predictions": preds,
                         "info": treat_info,
                         "top_conf": top_cnf,
@@ -261,8 +310,8 @@ if uploaded_images:
                     )
 
         with col2:
-            if uploaded_image.name in st.session_state.predictions_cache:
-                cached = st.session_state.predictions_cache[uploaded_image.name]
+            if file_key in st.session_state.predictions_cache:
+                cached = st.session_state.predictions_cache[file_key]
                 info = cached["info"]
                 top_conf = cached["top_conf"]
                 predictions = cached["predictions"]
@@ -281,6 +330,12 @@ if uploaded_images:
                 )
                 st.progress(min(top_conf / 100, 1.0))
 
+                if top_conf < LOW_CONFIDENCE_THRESHOLD:
+                    st.warning(
+                        "⚠️ Low confidence — this result may be wrong. Try a clearer, "
+                        "closer photo of a single leaf on a plain background."
+                    )
+
                 with st.expander("🔍 Symptoms", expanded=True):
                     st.write(info.get("symptoms", "N/A"))
                 with st.expander("💊 Recommended Pesticide", expanded=True):
@@ -298,9 +353,9 @@ if uploaded_images:
 
                 st.markdown('<p class="info-label">Was this prediction accurate?</p>', unsafe_allow_html=True)
                 fb_col1, fb_col2 = st.columns(2)
-                if fb_col1.button("👍 Yes", key=f"yes_{uploaded_image.name}"):
+                if fb_col1.button("👍 Yes", key=f"yes_{file_key}"):
                     st.success("Feedback recorded. Thank you!")
-                if fb_col2.button("👎 No", key=f"no_{uploaded_image.name}"):
+                if fb_col2.button("👎 No", key=f"no_{file_key}"):
                     st.info("Feedback noted for ongoing model calibration.")
 else:
     st.info("👆 Upload one or more leaf images to get started.")
